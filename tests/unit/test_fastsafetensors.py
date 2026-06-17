@@ -28,7 +28,7 @@ from fastsafetensors.st_types import Device, DeviceType, DType
 
 # Add tests directory to path to import platform_utils
 sys.path.insert(0, os.path.dirname(__file__))
-from platform_utils import skip_if_rocm_expected_failure
+from platform_utils import skip_if_no_hipfile, skip_if_rocm_expected_failure
 
 
 def load_safetensors_file(
@@ -374,6 +374,44 @@ def test_GdsFileCopier(fstcpp_log, input_files, framework) -> None:
     del reader
     assert framework.get_mem_used() == 0
     assert fstcpp.get_cpp_metrics().bounce_buffer_bytes == 0
+
+
+@pytest.mark.parametrize("use_buf_register", [False, True])
+@pytest.mark.parametrize("max_copy_block_size", [10 * 1024 * 1024 * 1024, 4096])
+def test_HipFileCopier(
+    fstcpp_log, input_files, framework, use_buf_register, max_copy_block_size
+) -> None:
+    print("test_HipFileCopier")
+    skip_if_no_hipfile()
+    from fastsafetensors.copier.hipfile import HipFileCopier
+
+    meta = SafeTensorsMetadata.from_file(input_files[0], framework)
+    device, dev_is_gpu = get_and_check_device(framework)
+    reader = fstcpp.gds_file_reader(4, dev_is_gpu, device.index or 0)
+    copier = HipFileCopier(meta, device, reader, framework)
+    gbuf = copier.submit_io(use_buf_register, max_copy_block_size)
+    tensors = copier.wait_io(gbuf)
+    for key, exp in load_safetensors_file(input_files[0], device, framework).items():
+        actual = tensors[key]
+        assert framework.is_equal(actual, exp)
+    framework.free_tensor_memory(gbuf, device)
+    del copier
+    del reader
+    assert framework.get_mem_used() == 0
+    assert fstcpp.get_cpp_metrics().bounce_buffer_bytes == 0
+
+
+def test_gds_path_selects_hipfile_on_rocm(fstcpp_log, input_files, framework) -> None:
+    print("test_gds_path_selects_hipfile_on_rocm")
+    skip_if_no_hipfile()
+    from fastsafetensors.copier.gds import new_gds_file_copier
+    from fastsafetensors.copier.hipfile import HipFileCopier
+
+    device, _ = get_and_check_device(framework)
+    meta = SafeTensorsMetadata.from_file(input_files[0], framework)
+    ctor = new_gds_file_copier(device, framework=framework)
+    copier = ctor(meta, device, framework)
+    assert isinstance(copier, HipFileCopier)
 
 
 def _skip_if_not_pytorch(framework: FrameworkOpBase) -> None:

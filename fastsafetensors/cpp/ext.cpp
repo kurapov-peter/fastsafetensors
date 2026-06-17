@@ -199,6 +199,7 @@ ext_funcs_t cuda_fns;
 static bool gpu_found = false;
 static bool is_hip_runtime = false;
 static bool cufile_found = false;
+static bool hipfile_found = false;
 
 static int cufile_ver = 0;
 
@@ -374,7 +375,43 @@ static void load_library_functions(const std::string& cudart_override = "") {
         }
     }
 
-    if (!cufile_found) {
+    hipfile_found = false;
+#ifndef _MSC_VER
+    if (gpu_found && is_hip_runtime && !cufile_found) {
+        void* handle_hipfile = dlopen("libhipfile.so", mode);
+        if (handle_hipfile) {
+            // Route symbols through the same shim that dispatches cuFile* fns.
+            // Driver functions are mapped for symmetry, currently unused since they are optional.
+            mydlsym(&cuda_fns.cuFileDriverOpen, handle_hipfile, "hipFileDriverOpen");
+            mydlsym(&cuda_fns.cuFileDriverClose, handle_hipfile, "hipFileDriverClose");
+            mydlsym(&cuda_fns.cuFileDriverSetMaxDirectIOSize, handle_hipfile, "hipFileDriverSetMaxDirectIOSize");
+            mydlsym(&cuda_fns.cuFileDriverSetMaxPinnedMemSize, handle_hipfile, "hipFileDriverSetMaxPinnedMemSize");
+            mydlsym(&cuda_fns.cuFileBufRegister, handle_hipfile, "hipFileBufRegister");
+            mydlsym(&cuda_fns.cuFileBufDeregister, handle_hipfile, "hipFileBufDeregister");
+            mydlsym(&cuda_fns.cuFileHandleRegister, handle_hipfile, "hipFileHandleRegister");
+            mydlsym(&cuda_fns.cuFileHandleDeregister, handle_hipfile, "hipFileHandleDeregister");
+            mydlsym(&cuda_fns.cuFileRead, handle_hipfile, "hipFileRead");
+
+            bool success = cuda_fns.cuFileDriverOpen && cuda_fns.cuFileDriverClose
+                && cuda_fns.cuFileDriverSetMaxDirectIOSize && cuda_fns.cuFileDriverSetMaxPinnedMemSize
+                && cuda_fns.cuFileBufRegister && cuda_fns.cuFileBufDeregister
+                && cuda_fns.cuFileHandleRegister && cuda_fns.cuFileHandleDeregister
+                && cuda_fns.cuFileRead;
+            if (success) {
+                hipfile_found = true;
+                if (init_log) {
+                    fprintf(stderr, "[DEBUG] loaded: libhipfile.so\n");
+                }
+            } else if (init_log) {
+                fprintf(stderr, "[DEBUG] libhipfile.so missing required functions. fallback\n");
+            }
+            dlclose(handle_hipfile);
+        } else if (init_log) {
+            fprintf(stderr, "[DEBUG] libhipfile.so is not installed. fallback\n");
+        }
+    }
+#endif
+    if (!cufile_found && !hipfile_found) {
         cuda_fns.cuFileDriverOpen = cpu_cuFileDriverOpen;
         cuda_fns.cuFileDriverClose = cpu_cuFileDriverClose;
         cuda_fns.cuFileDriverSetMaxDirectIOSize = cpu_cuFileDriverSetMaxDirectIOSize;
@@ -401,6 +438,11 @@ bool is_hip_found()
 bool is_cufile_found()
 {
     return cufile_found;
+}
+
+bool is_hipfile_found()
+{
+    return hipfile_found;
 }
 
 /* The version is returned as (1000 * major + 10 * minor). */
@@ -443,11 +485,22 @@ void init_gil_release_from_env() {
 
 int is_gds_supported(int deviceId)
 {
-    if (is_hip_runtime) return 0;  // ROCm does not have GDS
-
-    int gdr_support = 1;
     int driverVersion = 0;
     cudaError_t err;
+
+    if (is_hip_runtime) {
+        // HipFile requires ROCm >= 7.2.
+        if (!hipfile_found) return -1;
+        constexpr int HIPFILE_MIN_HIP_VER = 70200000;
+        err = cuda_fns.cudaDriverGetVersion(&driverVersion);
+        if (err != cudaSuccess) {
+            std::fprintf(stderr, "is_gds_supported: hipDriverGetVersion failed, err=%d\n", err);
+            return -1;
+        }
+        return driverVersion >= HIPFILE_MIN_HIP_VER ? 1 : -1;
+    }
+
+    int gdr_support = 1;
 
     err = cuda_fns.cudaDriverGetVersion(&driverVersion);
     if (err != cudaSuccess) {
@@ -980,6 +1033,7 @@ PYBIND11_MODULE(__MOD_NAME__, m)
     m.def("is_cuda_found", &is_cuda_found);
     m.def("is_hip_found", &is_hip_found);
     m.def("is_cufile_found", &is_cufile_found);
+    m.def("is_hipfile_found", &is_hipfile_found);
     m.def("cufile_version", &cufile_version);
     m.def("set_debug_log", &set_debug_log);
     m.def("get_alignment_size", &get_alignment_size);

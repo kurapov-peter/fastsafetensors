@@ -37,6 +37,22 @@ def skip_if_rocm_expected_failure(test_name):
         )
 
 
+def hipfile_available():
+    """Return True if the hipFile Python bindings can be imported."""
+    try:
+        from fastsafetensors.copier.hipfile import is_hipfile_available
+
+        return is_hipfile_available()
+    except Exception:
+        return False
+
+
+def skip_if_no_hipfile():
+    """Skip test unless the hipFile bindings are importable on a HIP GPU."""
+    if not (is_rocm_platform() and hipfile_available()):
+        pytest.skip("hipFile bindings not available")
+
+
 def get_platform_info():
     """Get platform information for debugging.
 

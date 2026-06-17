@@ -7,6 +7,7 @@ if sys.platform == "win32":
     from .dstorage import DStorageFileCopier
 
 from .gds import GdsFileCopier
+from .hipfile import HipFileCopier
 from .nogds import NoGdsFileCopier
 from .registry import (
     CopierConstructFunc,
