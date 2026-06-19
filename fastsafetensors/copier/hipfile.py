@@ -35,8 +35,10 @@ class HipFileCopier(GdsFileCopier):
             while count < span:
                 l = min(chunk, span - count)
                 # Stage through tmp: src and dst overlap when shift < l.
-                tmp[:l] = buf[shift + count : shift + count + l]
-                buf[count : count + l] = tmp[:l]
+                self.framework.copy_tensor(
+                    tmp[:l], buf[shift + count : shift + count + l]
+                )
+                self.framework.copy_tensor(buf[count : count + l], tmp[:l])
                 count += l
             self.framework.synchronize(self.device)
         finally:
@@ -46,7 +48,7 @@ class HipFileCopier(GdsFileCopier):
         from ..dlpack import from_cuda_buffer
 
         dl = from_cuda_buffer(ptr, [n], [1], DType.U8, self.device)
-        return self.framework.from_dlpack(dl, self.device, DType.U8).get_raw()
+        return self.framework.from_dlpack(dl, self.device, DType.U8)
 
 
 @register_copier_constructor("hipfile")
