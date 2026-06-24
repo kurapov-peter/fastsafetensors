@@ -23,34 +23,30 @@ def is_cuda_platform():
     return not is_rocm_platform()
 
 
-# List of tests that are expected to fail on ROCm (based on TEST_RESULTS.md)
-ROCM_EXPECTED_FAILURES = {
-    "test_GdsFileCopier",  # GDS not available on AMD
-}
+def get_and_check_device(framework):
+    from fastsafetensors.common import is_gpu_found
+    from fastsafetensors.st_types import Device
+
+    dev_is_gpu = is_gpu_found()
+    device = "cpu"
+    if dev_is_gpu:
+        if framework.get_name() == "pytorch":
+            device = "cuda:0"
+        elif framework.get_name() == "paddle":
+            device = "gpu:0"
+    return Device.from_str(device), dev_is_gpu
 
 
-def skip_if_rocm_expected_failure(test_name):
-    """Skip test if it's an expected failure on ROCm."""
-    if is_rocm_platform() and test_name in ROCM_EXPECTED_FAILURES:
-        pytest.skip(
-            f"Test '{test_name}' is expected to fail on ROCm (GDS not supported)"
-        )
+def skip_if_no_gds(framework):
+    """Skip test when a GPU is present but direct GDS I/O is unavailable."""
+    from fastsafetensors import cpp as fstcpp
 
-
-def hipfile_available():
-    """Return True if the hipFile Python bindings can be imported."""
-    try:
-        from fastsafetensors.copier.hipfile import is_hipfile_available
-
-        return is_hipfile_available()
-    except Exception:
-        return False
-
-
-def skip_if_no_hipfile():
-    """Skip test unless the hipFile bindings are importable on a HIP GPU."""
-    if not (is_rocm_platform() and hipfile_available()):
-        pytest.skip("hipFile bindings not available")
+    device, dev_is_gpu = get_and_check_device(framework)
+    if not dev_is_gpu:
+        return
+    device_id = device.index if device.index is not None else 0
+    if fstcpp.is_gds_supported(device_id) != 1:
+        pytest.skip("direct GDS I/O not available (needs cuFile or hipFile)")
 
 
 def get_platform_info():

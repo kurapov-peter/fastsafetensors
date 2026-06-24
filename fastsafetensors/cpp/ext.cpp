@@ -199,7 +199,6 @@ ext_funcs_t cuda_fns;
 static bool gpu_found = false;
 static bool is_hip_runtime = false;
 static bool cufile_found = false;
-static bool hipfile_found = false;
 
 static int cufile_ver = 0;
 
@@ -278,10 +277,8 @@ static bool load_gpu_lib(const std::string& lib_name, bool is_hip, bool init_log
 
 static void load_library_functions(const std::string& cudart_override = "") {
 #ifdef _MSC_VER
-    const char* cufileLib = nullptr; // cuFile not available on Windows
     const char* numaLib = nullptr;  // NUMA not available on Windows
 #else
-    const char* cufileLib = "libcufile.so.0";
     const char* numaLib = "libnuma.so.1";
 #endif
     bool init_log = getenv(ENV_ENABLE_INIT_LOG);
@@ -331,87 +328,65 @@ static void load_library_functions(const std::string& cudart_override = "") {
         cuda_fns.cudaDestroyExternalMemory = nullptr;
     }
 
+#ifdef _MSC_VER
+    const char* gdsLib = nullptr; // neither cuFile nor hipFile on Windows
+#else
+    const char* gdsLib = is_hip_runtime ? HIPFILE_LIB : CUFILE_LIB;
+#endif
     cufile_found = false;
-    if (gpu_found && cufileLib) {
-        void* handle_cufile = dlopen(cufileLib, mode);
-        if (handle_cufile) {
-            CUfileError_t (*cuFileGetVersion)(int *);
-            mydlsym(&cuFileGetVersion, handle_cufile, "cuFileGetVersion");
-            if (cuFileGetVersion) {
-                int version;
-                CUfileError_t err = cuFileGetVersion(&version);
-                if (err.err == CU_FILE_SUCCESS) {
-                    cufile_ver = version;
+    if (gpu_found && gdsLib) {
+        const bool is_hip = is_hip_runtime;
+        void* handle_gds = dlopen(gdsLib, mode);
+        if (handle_gds) {
+            if (!is_hip) {
+                // Only cuFile exposes a version query; hipFile does not.
+                CUfileError_t (*cuFileGetVersion)(int *);
+                mydlsym(&cuFileGetVersion, handle_gds, CUFILE_SYM_GET_VERSION);
+                if (cuFileGetVersion) {
+                    int version;
+                    CUfileError_t err = cuFileGetVersion(&version);
+                    if (err.err == CU_FILE_SUCCESS) {
+                        cufile_ver = version;
+                    }
+                }
+                if (cufile_ver == 0) {
+                    fprintf(stderr, "[WARN] %s is loaded but its version is unknown", gdsLib);
                 }
             }
-            if (cufile_ver == 0) {
-                fprintf(stderr, "[WARN] libcufile.so is loaded but its version is unknown");
-            }
-            mydlsym(&cuda_fns.cuFileDriverOpen, handle_cufile, "cuFileDriverOpen");
-            mydlsym(&cuda_fns.cuFileDriverClose, handle_cufile, "cuFileDriverClose");
-            mydlsym(&cuda_fns.cuFileDriverSetMaxDirectIOSize, handle_cufile, "cuFileDriverSetMaxDirectIOSize");
-            mydlsym(&cuda_fns.cuFileDriverSetMaxPinnedMemSize, handle_cufile, "cuFileDriverSetMaxPinnedMemSize");
-            mydlsym(&cuda_fns.cuFileBufRegister, handle_cufile, "cuFileBufRegister");
-            mydlsym(&cuda_fns.cuFileBufDeregister, handle_cufile, "cuFileBufDeregister");
-            mydlsym(&cuda_fns.cuFileHandleRegister, handle_cufile, "cuFileHandleRegister");
-            mydlsym(&cuda_fns.cuFileHandleDeregister, handle_cufile, "cuFileHandleDeregister");
-            mydlsym(&cuda_fns.cuFileRead, handle_cufile, "cuFileRead");
+            mydlsym(&cuda_fns.cuFileDriverOpen, handle_gds, is_hip ? HIPFILE_SYM_DRIVER_OPEN : CUFILE_SYM_DRIVER_OPEN);
+            mydlsym(&cuda_fns.cuFileDriverClose, handle_gds, is_hip ? HIPFILE_SYM_DRIVER_CLOSE : CUFILE_SYM_DRIVER_CLOSE);
+            mydlsym(&cuda_fns.cuFileDriverSetMaxDirectIOSize, handle_gds, is_hip ? HIPFILE_SYM_DRIVER_SET_MAX_DIO_SIZE : CUFILE_SYM_DRIVER_SET_MAX_DIO_SIZE);
+            mydlsym(&cuda_fns.cuFileDriverSetMaxPinnedMemSize, handle_gds, is_hip ? HIPFILE_SYM_DRIVER_SET_MAX_PIN_SIZE : CUFILE_SYM_DRIVER_SET_MAX_PIN_SIZE);
+            mydlsym(&cuda_fns.cuFileBufRegister, handle_gds, is_hip ? HIPFILE_SYM_BUF_REGISTER : CUFILE_SYM_BUF_REGISTER);
+            mydlsym(&cuda_fns.cuFileBufDeregister, handle_gds, is_hip ? HIPFILE_SYM_BUF_DEREGISTER : CUFILE_SYM_BUF_DEREGISTER);
+            mydlsym(&cuda_fns.cuFileHandleRegister, handle_gds, is_hip ? HIPFILE_SYM_HANDLE_REGISTER : CUFILE_SYM_HANDLE_REGISTER);
+            mydlsym(&cuda_fns.cuFileHandleDeregister, handle_gds, is_hip ? HIPFILE_SYM_HANDLE_DEREGISTER : CUFILE_SYM_HANDLE_DEREGISTER);
+            mydlsym(&cuda_fns.cuFileRead, handle_gds, is_hip ? HIPFILE_SYM_READ : CUFILE_SYM_READ);
             bool success = cuda_fns.cuFileDriverOpen && cuda_fns.cuFileDriverClose && cuda_fns.cuFileDriverSetMaxDirectIOSize;
             success &= cuda_fns.cuFileDriverSetMaxPinnedMemSize && cuda_fns.cuFileBufRegister && cuda_fns.cuFileBufDeregister;
             success &= cuda_fns.cuFileHandleRegister && cuda_fns.cuFileHandleDeregister && cuda_fns.cuFileRead;
             if (!success) {
                 if (init_log) {
-                    fprintf(stderr, "[DEBUG] %s does not contain required cuFile functions. fallback\n", cufileLib);
+                    fprintf(stderr, "[DEBUG] %s does not contain required GDS functions. fallback\n", gdsLib);
                 }
             } else {
                 if (init_log) {
-                    fprintf(stderr, "[DEBUG] loaded: %s (ver: %d.%d.%d)\n", cufileLib, cufile_ver / 1000, (cufile_ver % 1000) / 10, cufile_ver % 10);
+                    if (is_hip) {
+                        // hipFile has no version query (see above).
+                        fprintf(stderr, "[DEBUG] loaded: %s\n", gdsLib);
+                    } else {
+                        fprintf(stderr, "[DEBUG] loaded: %s (ver: %d.%d.%d)\n", gdsLib, cufile_ver / 1000, (cufile_ver % 1000) / 10, cufile_ver % 10);
+                    }
                 }
                 cufile_found = true;
             }
-            dlclose(handle_cufile);
+            dlclose(handle_gds);
         } else if (init_log) {
-            fprintf(stderr, "[DEBUG] %s is not installed. fallback\n", cufileLib);
+            fprintf(stderr, "[DEBUG] %s is not installed. fallback\n", gdsLib);
         }
     }
 
-    hipfile_found = false;
-#ifndef _MSC_VER
-    if (gpu_found && is_hip_runtime && !cufile_found) {
-        void* handle_hipfile = dlopen("libhipfile.so", mode);
-        if (handle_hipfile) {
-            // Route symbols through the same shim that dispatches cuFile* fns.
-            // Driver functions are mapped for symmetry, currently unused since they are optional.
-            mydlsym(&cuda_fns.cuFileDriverOpen, handle_hipfile, "hipFileDriverOpen");
-            mydlsym(&cuda_fns.cuFileDriverClose, handle_hipfile, "hipFileDriverClose");
-            mydlsym(&cuda_fns.cuFileDriverSetMaxDirectIOSize, handle_hipfile, "hipFileDriverSetMaxDirectIOSize");
-            mydlsym(&cuda_fns.cuFileDriverSetMaxPinnedMemSize, handle_hipfile, "hipFileDriverSetMaxPinnedMemSize");
-            mydlsym(&cuda_fns.cuFileBufRegister, handle_hipfile, "hipFileBufRegister");
-            mydlsym(&cuda_fns.cuFileBufDeregister, handle_hipfile, "hipFileBufDeregister");
-            mydlsym(&cuda_fns.cuFileHandleRegister, handle_hipfile, "hipFileHandleRegister");
-            mydlsym(&cuda_fns.cuFileHandleDeregister, handle_hipfile, "hipFileHandleDeregister");
-            mydlsym(&cuda_fns.cuFileRead, handle_hipfile, "hipFileRead");
-
-            bool success = cuda_fns.cuFileDriverOpen && cuda_fns.cuFileDriverClose
-                && cuda_fns.cuFileDriverSetMaxDirectIOSize && cuda_fns.cuFileDriverSetMaxPinnedMemSize
-                && cuda_fns.cuFileBufRegister && cuda_fns.cuFileBufDeregister
-                && cuda_fns.cuFileHandleRegister && cuda_fns.cuFileHandleDeregister
-                && cuda_fns.cuFileRead;
-            if (success) {
-                hipfile_found = true;
-                if (init_log) {
-                    fprintf(stderr, "[DEBUG] loaded: libhipfile.so\n");
-                }
-            } else if (init_log) {
-                fprintf(stderr, "[DEBUG] libhipfile.so missing required functions. fallback\n");
-            }
-            dlclose(handle_hipfile);
-        } else if (init_log) {
-            fprintf(stderr, "[DEBUG] libhipfile.so is not installed. fallback\n");
-        }
-    }
-#endif
-    if (!cufile_found && !hipfile_found) {
+    if (!cufile_found) {
         cuda_fns.cuFileDriverOpen = cpu_cuFileDriverOpen;
         cuda_fns.cuFileDriverClose = cpu_cuFileDriverClose;
         cuda_fns.cuFileDriverSetMaxDirectIOSize = cpu_cuFileDriverSetMaxDirectIOSize;
@@ -438,11 +413,6 @@ bool is_hip_found()
 bool is_cufile_found()
 {
     return cufile_found;
-}
-
-bool is_hipfile_found()
-{
-    return hipfile_found;
 }
 
 /* The version is returned as (1000 * major + 10 * minor). */
@@ -490,7 +460,7 @@ int is_gds_supported(int deviceId)
 
     if (is_hip_runtime) {
         // HipFile requires ROCm >= 7.2.
-        if (!hipfile_found) return -1;
+        if (!cufile_found) return -1;
         constexpr int HIPFILE_MIN_HIP_VER = 70200000;
         err = cuda_fns.cudaDriverGetVersion(&driverVersion);
         if (err != cudaSuccess) {
@@ -1033,7 +1003,6 @@ PYBIND11_MODULE(__MOD_NAME__, m)
     m.def("is_cuda_found", &is_cuda_found);
     m.def("is_hip_found", &is_hip_found);
     m.def("is_cufile_found", &is_cufile_found);
-    m.def("is_hipfile_found", &is_hipfile_found);
     m.def("cufile_version", &cufile_version);
     m.def("set_debug_log", &set_debug_log);
     m.def("get_alignment_size", &get_alignment_size);

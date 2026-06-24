@@ -30,7 +30,6 @@ class GdsFileCopier(CopierInterface):
         self.gbuf = None
         self.fh: Optional[fstcpp.gds_file_handle] = None
         self.copy_reqs: Dict[int, int] = {}
-        self.aligned_offset = 0
         self.aligned_length = 0
         cuda_ver = framework.get_cuda_ver()
         if cuda_ver and cuda_ver != "0.0":
@@ -73,10 +72,10 @@ class GdsFileCopier(CopierInterface):
         tail_bytes = (length + head_bytes) % ALIGN
         if tail_bytes > 0:
             tail_bytes = ALIGN - tail_bytes
+            aligned_length = length + head_bytes + tail_bytes
+        else:
+            aligned_length = length + head_bytes
         aligned_offset = offset - head_bytes
-        aligned_length = length + head_bytes + tail_bytes
-        self.aligned_offset = aligned_offset
-        self.aligned_length = aligned_length
 
         gbuf = self.framework.alloc_tensor_memory(aligned_length, self.device)
         if use_buf_register:
@@ -111,6 +110,8 @@ class GdsFileCopier(CopierInterface):
                 raise Exception(f"submit_io: submit_gds_read failed, err={req}")
             self.copy_reqs[req] = -1 if not use_buf_register else count
             count += req_len
+        self.aligned_offset = aligned_offset
+        self.aligned_length = aligned_length
         return gbuf
 
     def wait_io(
@@ -138,32 +139,27 @@ class GdsFileCopier(CopierInterface):
             misaligned_bytes = (
                 self.metadata.header_length % self.framework.get_device_ptr_align()
             )
-            self._shift_down(gbuf, misaligned_bytes)
+            length = 1024 * 1024 * 1024
+            tmp_gbuf = self.framework.alloc_tensor_memory(length, self.device)
+            count = 0
+            while count + misaligned_bytes < self.aligned_length:
+                l = self.aligned_length - misaligned_bytes - count
+                if l > length:
+                    l = length
+                logger.debug(
+                    "wait_io: fix misalignment, src=0x%x, misaligned_bytes=%d, count=%d, tmp=0x%x",
+                    gbuf.get_base_address(),
+                    misaligned_bytes,
+                    count,
+                    tmp_gbuf.get_base_address(),
+                )
+                gbuf.memmove(count, misaligned_bytes + count, tmp_gbuf, l)
+                count += l
+            self.framework.free_tensor_memory(tmp_gbuf, self.device)
             self.aligned_offset += misaligned_bytes
         return self.metadata.get_tensors(
             gbuf, self.device, self.aligned_offset, dtype=dtype
         )
-
-    def _shift_down(self, gbuf: fstcpp.gds_device_buffer, shift: int) -> None:
-        if shift <= 0:
-            return
-        length = 1024 * 1024 * 1024
-        tmp_gbuf = self.framework.alloc_tensor_memory(length, self.device)
-        count = 0
-        while count + shift < self.aligned_length:
-            l = self.aligned_length - shift - count
-            if l > length:
-                l = length
-            logger.debug(
-                "wait_io: fix misalignment, src=0x%x, misaligned_bytes=%d, count=%d, tmp=0x%x",
-                gbuf.get_base_address(),
-                shift,
-                count,
-                tmp_gbuf.get_base_address(),
-            )
-            gbuf.memmove(count, shift + count, tmp_gbuf, l)
-            count += l
-        self.framework.free_tensor_memory(tmp_gbuf, self.device)
 
 
 _inited_gds = False
@@ -193,17 +189,14 @@ def new_gds_file_copier(
         )
     device_id = device.index if device.index is not None else 0
     nogds = False
-    use_hipfile = False
     if device_is_not_cpu:
         gds_supported = fstcpp.is_gds_supported(device_id)
         if gds_supported < 0:
             raise Exception(f"is_gds_supported({device.index}) failed")
         if fstcpp.is_hip_found():
-            if gds_supported == 1:
-                use_hipfile = True
-            else:
+            if gds_supported != 1:
                 warnings.warn(
-                    "hipFile direct I/O is unavailable (needs libhipfile.so and "
+                    "hipFile DMA is unavailable (needs libhipfile.so and "
                     "ROCm >= 7.2); falling back to host-staged reads (nogds).",
                     UserWarning,
                 )
@@ -230,11 +223,6 @@ def new_gds_file_copier(
         if device_is_not_cpu and is_unified_memory_system(kwargs.get("framework")):
             return new_unified_copier(device)
         return new_nogds_file_copier(device, bbuf_size_kb, max_threads)
-
-    if use_hipfile:
-        from .hipfile import new_hipfile_copier
-
-        return new_hipfile_copier(device, bbuf_size_kb, max_threads)
 
     reader = fstcpp.gds_file_reader(max_threads, device_is_not_cpu, device_id)
 
