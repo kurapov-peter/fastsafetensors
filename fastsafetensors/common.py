@@ -69,6 +69,24 @@ def _normalize_windows_dll_path(path: str, source: str) -> str:
     return normalized
 
 
+def resolve_runtime_lib_name(framework) -> str:
+    """Map the framework's declared GPU vendor to a runtime library to dlopen."""
+    if framework is None or sys.platform == "win32":
+        return ""
+    try:
+        ver = framework.get_cuda_ver()
+    except Exception:
+        return ""
+    if not ver or "-" not in ver:
+        return ""
+    vendor = ver.split("-", 1)[0]
+    if vendor == "hip":
+        return "libamdhip64.so"
+    if vendor == "cuda":
+        return "libcudart.so"
+    return ""
+
+
 def resolve_cudart_lib_name() -> str:
     """Resolve the CUDA runtime library name for the current platform.
 

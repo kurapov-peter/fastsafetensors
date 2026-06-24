@@ -5,7 +5,12 @@ import sys
 from typing import Dict, List
 
 from .. import cpp as fstcpp
-from ..common import SafeTensorsMetadata, is_gpu_found, resolve_cudart_lib_name
+from ..common import (
+    SafeTensorsMetadata,
+    is_gpu_found,
+    resolve_cudart_lib_name,
+    resolve_runtime_lib_name,
+)
 from ..frameworks import FrameworkOpBase, TensorBase
 from ..st_types import Device, DeviceType, DType
 from .base import CopierInterface
@@ -81,12 +86,21 @@ class NoGdsFileCopier(CopierInterface):
 _loaded_library = False
 
 
-def load_library_func():
+def load_library_func(framework=None):
     global _loaded_library
-    if not _loaded_library:
-        cudart_lib = resolve_cudart_lib_name()
-        fstcpp.load_library_functions(cudart_lib)
-        _loaded_library = True
+    if _loaded_library:
+        return
+    # Prefer a framework-hinted runtime (keeps the dlopen'd vendor in sync with
+    # the framework's GPU build on multi-vendor hosts); fall back to the cudart
+    # resolver / compiled-in auto-detection otherwise.
+    lib = resolve_runtime_lib_name(framework) or resolve_cudart_lib_name()
+    fstcpp.load_library_functions(lib)
+    if lib and not is_gpu_found():
+        # The hint forced a runtime that found no GPU (e.g. framework reports a
+        # vendor whose runtime/devices aren't actually present). Retry the
+        # auto-probe so a usable GPU isn't missed because of a bad hint.
+        fstcpp.load_library_functions(resolve_cudart_lib_name())
+    _loaded_library = True
 
 
 @register_copier_constructor("nogds")
@@ -96,7 +110,7 @@ def new_nogds_file_copier(
     max_threads: int = 16,
     **kwargs,
 ) -> CopierConstructFunc:
-    load_library_func()
+    load_library_func(kwargs.get("framework"))
     device_is_not_cpu = device.type != DeviceType.CPU
     if device_is_not_cpu and not is_gpu_found():
         raise Exception(
