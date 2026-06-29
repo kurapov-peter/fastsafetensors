@@ -26,10 +26,6 @@ from fastsafetensors.dlpack import from_cuda_buffer
 from fastsafetensors.frameworks import FrameworkOpBase
 from fastsafetensors.st_types import Device, DeviceType, DType
 
-# Add tests directory to path to import platform_utils
-sys.path.insert(0, os.path.dirname(__file__))
-from platform_utils import skip_if_rocm_expected_failure
-
 
 def load_safetensors_file(
     filename: str,
@@ -360,7 +356,6 @@ def test_NoGdsFileCopier(fstcpp_log, input_files, framework) -> None:
 
 def test_GdsFileCopier(fstcpp_log, input_files, framework) -> None:
     print("test_GdsFileCopier")
-    skip_if_rocm_expected_failure("test_GdsFileCopier")
     meta = SafeTensorsMetadata.from_file(input_files[0], framework)
     device, dev_is_gpu = get_and_check_device(framework)
     reader = fstcpp.gds_file_reader(4, dev_is_gpu, device.index or 0)

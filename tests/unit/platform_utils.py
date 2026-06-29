@@ -2,8 +2,6 @@
 
 """Utilities for platform detection and conditional test execution."""
 
-import pytest
-
 
 def is_rocm_platform():
     """Detect if running on ROCm/AMD platform.
@@ -21,20 +19,6 @@ def is_rocm_platform():
 def is_cuda_platform():
     """Detect if running on CUDA/NVIDIA platform."""
     return not is_rocm_platform()
-
-
-# List of tests that are expected to fail on ROCm (based on TEST_RESULTS.md)
-ROCM_EXPECTED_FAILURES = {
-    "test_GdsFileCopier",  # GDS not available on AMD
-}
-
-
-def skip_if_rocm_expected_failure(test_name):
-    """Skip test if it's an expected failure on ROCm."""
-    if is_rocm_platform() and test_name in ROCM_EXPECTED_FAILURES:
-        pytest.skip(
-            f"Test '{test_name}' is expected to fail on ROCm (GDS not supported)"
-        )
 
 
 def get_platform_info():
